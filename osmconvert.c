@@ -1,10 +1,10 @@
-// osmconvert 2017-06-18 21:30
-#define VERSION "0.8.8"
+// osmconvert 2020-03-31 14:20
+#define VERSION "0.8.11"
 //
 // compile this file:
 // gcc osmconvert.c -lz -O3 -o osmconvert
 //
-// (c) 2011..2017 Markus Weber, Nuernberg
+// (c) 2011..2020 Markus Weber, Nuernberg
 // Richard Russo contributed the initiative to --add-bbox-tags option
 //
 // This program is free software; you can redistribute it and/or
@@ -70,6 +70,7 @@ const char* shorthelptext=
 "--csv=<column names>      choose columns for csv format\n"
 "--csv-headline            start csv output with a headline\n"
 "--csv-separator=<sep>     separator character(s) for csv format\n"
+"--csv-noderef			   add noderef to ways as the last column\n"
 "--timestamp=<date_time>   add a timestamp to the data\n"
 "--timestamp=NOW-<seconds> add a timestamp in seconds before now\n"
 "--out-timestamp           output the file\'s timestamp, nothing else\n"
@@ -313,6 +314,9 @@ const char* helptext=
 "        character or character sequence. For example:\n"
 "        --csv-separator=\"; \"\n"
 "\n"
+"--csv-noderef\n"
+"        Choose this option to add the node references of the ways.\n"
+"\n"
 "--csv=<columns>\n"
 "        If you want to have certain columns in your csv list, please \n"
 "        specify their names as shown in this example:\n"
@@ -387,15 +391,15 @@ const char* helptext=
 "Tuning\n"
 "\n"
 "To speed-up the process, the program uses some main memory for a\n"
-"hash table. By default, it uses 900 MB for storing a flag for every\n"
-"possible node, 90 for the way flags, and 10 relation flags.\n"
-"Every byte holds the flags for 8 ID numbers, i.e., in 900 MB the\n"
-"program can store 7200 million flags. As there are less than 3200\n"
-"million IDs for nodes at present (Oct 2014), 400 MB would suffice.\n"
-"So, for example, you can decrease the hash sizes to e.g. 400, 50 and\n"
-"2 MB using this option:\n"
+"hash table. By default, it uses 1800 MB for storing a flag for every\n"
+"possible node, 180 for the way flags, and 20 relation flags.\n"
+"Every byte holds the flags for 8 ID numbers, i.e., in 1800 MB the\n"
+"program can store 14400 million flags. As there are less than 7400\n"
+"million IDs for nodes at present (Mar 2020), 925 MB would suffice.\n"
+"So, for example, you can decrease the hash sizes to e.g. 1000, 120\n"
+"and 4 MB using this option:\n"
 "\n"
-"  --hash-memory=400-50-2\n"
+"  --hash-memory=1000-120-4\n"
 "\n"
 "But keep in mind that the OSM database is continuously expanding. For\n"
 "this reason the program-own default value is higher than shown in the\n"
@@ -404,10 +408,10 @@ const char* helptext=
 "amount of memory as a sum, and the program will divide it by itself.\n"
 "For example:\n"
 "\n"
-"  --hash-memory=1500\n"
+"  --hash-memory=3000\n"
 "\n"
-"These 1500 MB will be split in three parts: 1350 for nodes, 135 for\n"
-"ways, and 15 for relations.\n"
+"These 3000 MB will be split in three parts: 2700 for nodes, 270 for\n"
+"ways, and 30 for relations.\n"
 "\n"
 "Because we are taking hashes, it is not necessary to provide all the\n"
 "suggested memory; the program will operate with less hash memory too.\n"
@@ -456,7 +460,7 @@ const char* helptext=
 "loss. Do not use the program in productive or commercial systems.\n"
 "\n"
 "There is NO WARRANTY, to the extent permitted by law.\n"
-"Please send any bug reports to markus.weber@gmx.com\n\n";
+"Please send any bug reports to marqqs@gmx.eu\n\n";
 
 #define _FILE_OFFSET_BITS 64
 #include <zlib.h>
@@ -595,6 +599,8 @@ static bool global_statistics= false;  // print statistics to stderr
 static bool global_outstatistics= false;  // print statistics to stdout
 static bool global_csvheadline= false;  // headline for csv
 static char global_csvseparator[16]= "\t";  // separator for csv
+static bool global_csvnoderef=false;  // whether to print or not node per ways
+static char global_noderefseparator[2] = ";";
 static bool global_completeways= false;  // when applying borders,
   // do not clip ways but include them as whole if at least a single
   // of its nodes lies inside the borders;
@@ -1621,7 +1627,7 @@ static int hash_ini(int n,int w,int r) {
     return 0;  // ignore the call of this procedure
   // check parameters and store the values
   #define D(x,o) if(x<1) x= 1; else if(x>4000) x= 4000; \
-    hash__max[o]= x*(1024*1024);
+    hash__max[o]= x*(1024u*1024u);
   D(n,0u) D(w,1u) D(r,2u)
   #undef D
   // allocate memory for each hash table
@@ -1743,7 +1749,7 @@ static int32_t border__bx1= 2000000000L,border__by1,
 // which refer to all that edges which overlap horizontally with
 // that region between x1 and the next higher x1 (x1 of the next edge
 // in the sorted list);
-#define border__edge_M 600004
+#define border__edge_M 60004
 typedef struct border__edge_t {
   int32_t x1,y1,x2,y2;  // coordinates of the edge; always: x1<x2;
   struct border__chain_t* chain;
@@ -3175,10 +3181,13 @@ static inline void write_timestamp(uint64_t v) {
 
 #define csv__keyM 200  // max number of keys and vals
 #define csv__keyMM 256  // max number of characters +1 in key or val
+#define csv__noderefM 16384
 static char* csv__key= NULL;  // [csv__keyM][csv__keyMM]
 static int csv__keyn= 0;  // number of keys
 static char* csv__val= NULL;  // [csv__keyM][csv__keyMM]
 static int csv__valn= 0;  // number of vals
+static char* csv__noderef= NULL;
+
 // some booleans which tell us if certain keys are in column list;
 // this is for program acceleration
 static bool csv_key_otype= false, csv_key_oname= false,
@@ -3190,11 +3199,12 @@ static char csv__rep0= ' ';  // replacement character for separator char
 
 static void csv__end() {
   // clean-up csv processing;
-
   if(csv__key!=NULL)
     { free(csv__key); csv__key= NULL; }
   if(csv__val!=NULL)
     { free(csv__val); csv__val= NULL; }
+  if(csv__noderef!=NULL)
+    { free(csv__noderef); csv__noderef= NULL; }
   }  // end   csv__end()
 
 //------------------------------------------------------------
@@ -3218,7 +3228,8 @@ static int csv_ini(const char* columns) {
 
     csv__key= (char*)malloc(csv__keyM*csv__keyMM);
     csv__val= (char*)malloc(csv__keyM*csv__keyMM);
-    if(csv__key==NULL || csv__val==NULL)
+    csv__noderef= (char*)malloc(csv__noderefM);
+    if(csv__key==NULL || csv__val==NULL || csv__noderef==NULL)
 return 1;
     atexit(csv__end);
     }
@@ -3325,6 +3336,11 @@ return;
     if(keyn>0)  // at least one column will follow
       write_str(global_csvseparator);
     }  // for all keys in column list
+  if (global_csvnoderef && strlen(csv__noderef) > 0) {
+  	write_str(global_csvseparator);
+  	write_str(csv__noderef);
+  	// strcpy(csv__noderef, "");
+  }
   write_str(NL);
   csv__valn= 0;
   }  // end   csv_write()
@@ -8619,7 +8635,8 @@ static inline void wo_node_close() {
 
 static inline void wo_way(int64_t id,
     int32_t hisver,int64_t histime,int64_t hiscset,
-    uint32_t hisuid,const char* hisuser) {
+    uint32_t hisuid,const char* hisuser,
+    int64_t* refidp, int64_t* refide) {
   // write osm way body;
   // id: id of this object;
   // hisver: version; 0: no author information is to be written
@@ -8670,6 +8687,20 @@ return;
       }
     if(csv_key_user)
       csv_add("@user",hisuser);
+
+  	if(global_csvnoderef) {
+  	  memset(csv__noderef, 0, csv__noderefM);
+	  while(refidp<refide) {  // for every referenced node
+		if(!global_dropbrokenrefs || hash_geti(0,*refidp)) {
+		  // referenced node lies inside the borders
+		  int64toa(*refidp, s);
+		  // wo_noderef(*refidp);
+		  strncat(csv__noderef, s, csv__noderefM);
+		  strncat(csv__noderef, global_noderefseparator, csv__noderefM);
+		}
+		refidp++;
+	  }  // end   for every referenced node
+  	}
 return;
     }
   // here: XML format
@@ -8843,8 +8874,9 @@ return;
     pw_way_ref(noderef);
 return;
     }
-  if(wo__format==21)  // csv
+  if(wo__format==21) // csv
 return;
+
   // here: XML format
   wo__CONTINUE
   switch(wo__format) {  // depending on output format
@@ -11273,10 +11305,10 @@ return 23;
               keyp= key; valp= val;
               while(keyp<keye) {  // for all key/val pairs of this object
                 if(strcmp(*keyp,"type")==0) {
-                  if((global_completemp &&
-                        strcmp(*valp,"multipolygon")==0) ||
-                      (global_completeboundaries &&
-                        strcmp(*valp,"boundary")==0))
+                  if(global_completemp &&
+                        strcmp(*valp,"multipolygon")==0 ||
+                      global_completeboundaries &&
+                        strcmp(*valp,"boundary")==0)
                     ismp= true;
               break;
                   }
@@ -11523,8 +11555,8 @@ return 26;
           keyp= key; valp= val;
           while(keyp<keye) {  // for all key/val pairs of this object
             if(modi_CHECK(otype,*keyp,*valp)) {
-              if(modi_check_add) wo_node_keyval(*keyp++,*valp++);
-              else keyp++; valp++;
+              if(modi_check_add) wo_node_keyval(*keyp,*valp);
+              keyp++; valp++;
               wo_node_keyval(modi_check_key,modi_check_val);
               }
             else
@@ -11666,8 +11698,8 @@ return 26;
                 while(keyp<keye) {
                     // for all key/val pairs of this object
                   if(modi_CHECK(otype,*keyp,*valp)) {
-                    if(modi_check_add) wo_node_keyval(*keyp++,*valp++);
-                    else keyp++; valp++;
+                    if(modi_check_add) wo_node_keyval(*keyp,*valp);
+                    keyp++; valp++;
                     wo_node_keyval(modi_check_key,modi_check_val);
                     }
                   else
@@ -11677,7 +11709,7 @@ return 26;
                 }  // there is at least one coordinate available
               }  // convert all objects to nodes
             else {  // objects are not to be converted to nodes
-              wo_way(id,hisver,histime,hiscset,hisuid,hisuser);
+              wo_way(id,hisver,histime,hiscset,hisuid,hisuser,refid,refide);
               refidp= refid;
               while(refidp<refide) {  // for every referenced node
                 if(!global_dropbrokenrefs || hash_geti(0,*refidp))
@@ -11691,8 +11723,8 @@ return 26;
               while(keyp<keye) {
                   // for all key/val pairs of this object
                 if(modi_CHECK(otype,*keyp,*valp)) {
-                  if(modi_check_add) wo_wayrel_keyval(*keyp++,*valp++);
-                  else keyp++; valp++;
+                  if(modi_check_add) wo_wayrel_keyval(*keyp,*valp);
+                  keyp++; valp++;
                   wo_wayrel_keyval(modi_check_key,modi_check_val);
                   }
                 else
@@ -11702,7 +11734,7 @@ return 26;
               }  // objects are not to be converted to nodes
             }  // coordinates of ways shall be calculated
           else  {  // coordinates of ways need not to be calculated
-            wo_way(id,hisver,histime,hiscset,hisuid,hisuser);
+            wo_way(id,hisver,histime,hiscset,hisuid,hisuser,refid,refide);
             refidp= refid;
             while(refidp<refide) {  // for every referenced node
               if(!global_dropbrokenrefs || hash_geti(0,*refidp))
@@ -11714,8 +11746,8 @@ return 26;
             while(keyp<keye) {
                 // for all key/val pairs of this object
               if(modi_CHECK(otype,*keyp,*valp)) {
-                if(modi_check_add) wo_wayrel_keyval(*keyp++,*valp++);
-                else keyp++; valp++;
+                if(modi_check_add) wo_wayrel_keyval(*keyp,*valp);
+                keyp++; valp++;
                 wo_wayrel_keyval(modi_check_key,modi_check_val);
                 }
               else
@@ -11838,8 +11870,8 @@ return 26;
               while(keyp<keye) {
                   // for all key/val pairs of this object
                 if(modi_CHECK(otype,*keyp,*valp)) {
-                  if(modi_check_add) wo_node_keyval(*keyp++,*valp++);
-                  else keyp++; valp++;
+                  if(modi_check_add) wo_node_keyval(*keyp,*valp);
+                  keyp++; valp++;
                   wo_node_keyval(modi_check_key,modi_check_val);
                   }
                 else
@@ -11897,8 +11929,8 @@ return 26;
             while(keyp<keye) {
                 // for all key/val pairs of this object
               if(modi_CHECK(otype,*keyp,*valp)) {
-                if(modi_check_add) wo_wayrel_keyval(*keyp++,*valp++);
-                else keyp++; valp++;
+                if(modi_check_add) wo_wayrel_keyval(*keyp,*valp);
+                keyp++; valp++;
                 wo_wayrel_keyval(modi_check_key,modi_check_val);
                 }
               else
@@ -12815,6 +12847,11 @@ return 0;
       global_outcsv= true;
   continue;  // take next parameter
       }
+    if(strcmp(a,"--csv-noderef")==0) {
+        // write node references per ways
+      global_csvnoderef= true;
+  continue;  // take next parameter
+      }
     if(strcmp(a,"--in-josm")==0) {
       // deprecated;
       // this option is still accepted for compatibility reasons;
@@ -13145,7 +13182,9 @@ return 3;
         "-b=, -B=, --drop-brokenrefs must not be combined with --diff");
 return 6;
       }
-    if(h_n==0) h_n= 1000;  // use standard value if not set otherwise
+    if(h_n==0) { // use standard values if not set otherwise
+      h_n= 1800; h_w= 180; h_r= 20;
+      }
     if(h_w==0 && h_r==0) {
         // user chose simple form for hash memory value
       // take the one given value as reference and determine the 
