@@ -17,9 +17,7 @@ Once successfull, run `make` to generate the executable files.
 
 An extra option has been added that allows printing of ways nodes as a column in `csv` format.
 
-"""
---csv-noderef
-        Choose this option to add the node references of the ways.
-"""
+        --csv-noderef
+                Choose this option to add the node references of the ways.
 
 The list of nodes is printed as a `;` separated list at the end of the way line, it is not possible to choose any other order as the list of nodes does not have a fixed length and will make processing more difficult.
